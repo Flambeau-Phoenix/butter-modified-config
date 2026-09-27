@@ -1,0 +1,215 @@
+# ==============================================================================
+# Butter AI Proxy Gateway - Unified Configuration
+# ==============================================================================
+# In this schema:
+#   1. Every routed model entry explicitly defines its 'provider'.
+#   2. The route key is namespaced as '<provider>/<model_id>' (the prefix route).
+#   3. 'model' specifies the raw model ID forwarded to the provider API.
+#   4. 'label' and 'family' are published via GET /v1/models and GET /api/models
+#      so downstream clients (Studio, chat, mobile, desktop) render clean badges
+#      and human-readable names automatically.
+# ==============================================================================
+
+server:
+  address: "127.0.0.1:8080"
+  read_timeout: 30s
+  write_timeout: 120s
+  read_header_timeout: 10s
+  idle_timeout: 120s
+  max_header_bytes: 1048576
+  max_request_bytes: 33554432
+
+providers:
+  # --- Cloud Aggregators & APIs ---
+  openrouter:
+    base_url: https://openrouter.ai/api/v1
+    credential_mode: passthrough
+    headers:
+      User-Agent: opencode/2.0.11
+      HTTP-Referer: https://opencode.ai
+      X-Title: opencode
+    keys:
+      - key: "${OPENROUTER_API_KEY}"
+        weight: 1
+
+  nvidia:
+    base_url: https://integrate.api.nvidia.com/v1
+    keys:
+      - key: "${NVIDIA_API_KEY}"
+        weight: 1
+
+  kilo:
+    base_url: http://hermes.ai.unturf.com/v1
+    keys:
+      - key: "${KILO_API_KEY}"
+        weight: 1
+
+  opencode:
+    base_url: https://opencode.ai/zen/go/v1
+    headers:
+      x-opencode-session: session-default
+    keys:
+      - key: "${OPENCODE_API_KEY}"
+        weight: 1
+
+  opencode-zen:
+    base_url: https://opencode.ai/zen/v1
+    headers:
+      User-Agent: opencode/2.0.11
+    keys:
+      - key: "${OPENCODE_API_KEY}"
+        weight: 1
+
+  # --- Local Tailnet & LAN Inference Nodes ---
+  ollama:
+    base_url: http://127.0.0.1:11434/v1
+    keys:
+      - key: ollama
+        weight: 1
+
+  desktop-ollama:
+    base_url: http://100.113.98.79:11434/v1
+    keys:
+      - key: ollama
+        weight: 1
+
+  pccoder:
+    base_url: http://100.113.98.79:11491/v1
+    keys:
+      - key: local-only
+        weight: 1
+
+  pctalker:
+    base_url: http://100.113.98.79:11492/v1
+    keys:
+      - key: local-only
+        weight: 1
+
+  pctalker-v2:
+    base_url: http://100.113.98.79:11493/v1
+    keys:
+      - key: local-only
+        weight: 1
+
+routing:
+  default_provider: openrouter
+
+  failover:
+    enabled: true
+    max_retries: 2
+    backoff:
+      initial: 100ms
+      multiplier: 2.0
+      max: 2s
+    retry_on: [429, 500, 502, 503, 504]
+
+  models:
+    # --------------------------------------------------------------------------
+    # Format:
+    #   "<prefix_route>":
+    #     provider: <provider_name>       # REQUIRED: matches key in providers
+    #     model: <upstream_model_id>      # REQUIRED: target model ID for provider
+    #     label: "<Human Readable Name>"  # Curated label for clients
+    #     family: <family_name>           # Model family (qwen, llama, kimi, glm)
+    #     strategy: priority              # Optional: priority | round-robin
+    # --------------------------------------------------------------------------
+
+    # --- NVIDIA Endpoints ---
+    "nvidia/kimi-k3":
+      provider: nvidia
+      model: kimi-k3
+      label: "Kimi K3"
+      family: kimi
+
+    "nvidia/glm-5-3":
+      provider: nvidia
+      model: glm-5-3
+      label: "GLM 5.3"
+      family: glm
+
+    "nvidia/glm-5-3-flash":
+      provider: nvidia
+      model: glm-5-3-flash
+      label: "GLM 5.3 Flash"
+      family: glm
+
+    "nvidia/deepseek-v4.1-flash":
+      provider: nvidia
+      model: deepseek-ai/deepseek-v4.1-flash
+      label: "DeepSeek V4.1 Flash"
+      family: deepseek
+
+    # --- Local Tailnet Workstations (pccoder, pctalker) ---
+    "pccoder/qwen3-coder-30b":
+      provider: pccoder
+      model: qwen3-coder-30b
+      label: "Qwen 3 Coder 30B (Local)"
+      family: qwen
+
+    "pctalker/qwen3-14b":
+      provider: pctalker
+      model: qwen3-14b
+      label: "Qwen 3 14B (Local)"
+      family: qwen
+
+    "pctalker-v2/qwen2.5-7b":
+      provider: pctalker-v2
+      model: qwen2.5-7b
+      label: "Qwen 2.5 7B (Local)"
+      family: qwen
+
+    # --- Local Ollama Instances ---
+    "ollama/llama3.2:3b":
+      provider: ollama
+      model: llama3.2:3b
+      label: "Llama 3.2 3B (Local)"
+      family: llama
+
+    "ollama/qwen3.5:2b":
+      provider: ollama
+      model: qwen3.5:2b
+      label: "Qwen 3.5 2B (Local)"
+      family: qwen
+
+    "desktop-ollama/llama3.2:3b":
+      provider: desktop-ollama
+      model: llama3.2:3b
+      label: "Llama 3.2 3B (Desktop)"
+      family: llama
+
+    "desktop-ollama/dolphin-mistral:7b":
+      provider: desktop-ollama
+      model: dolphin-mistral:7b
+      label: "Dolphin Mistral 7B"
+      family: mistral
+
+    # --- OpenRouter & Kilo Cloud Routes ---
+    "openrouter/free":
+      provider: openrouter
+      model: openrouter/free
+      label: "OpenRouter Free"
+      family: openrouter
+
+    "openrouter/gpt-oss-20b":
+      provider: openrouter
+      model: openai/gpt-oss-20b
+      label: "GPT OSS 20B"
+      family: gpt
+
+    "kilo/glm-5.2:free":
+      provider: kilo
+      model: z-ai/glm-5.2:free
+      label: "GLM 5.2 (Free)"
+      family: glm
+
+    "kilo/ling-3.0-flash-vl:free":
+      provider: kilo
+      model: inclusionai/ling-3.0-flash-vl:free
+      label: "Ling 3.0 Flash VL"
+      family: other
+
+    "opencode/muse-spark-1.3":
+      provider: opencode
+      model: muse-spark-1.3
+      label: "Muse Spark 1.3"
+      family: other

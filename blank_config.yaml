@@ -1,0 +1,24 @@
+server:
+  address: :8080
+  read_timeout: 30s
+  write_timeout: 120s
+  read_header_timeout: 10s
+  idle_timeout: 120s
+  max_header_bytes: 1048576
+  max_request_bytes: 33554432
+providers: {}
+routing:
+  failover:
+    enabled: true
+    max_retries: 2
+    backoff:
+      initial: 100ms
+      multiplier: 2.0
+      max: 2s
+    retry_on:
+    - 429
+    - 500
+    - 502
+    - 503
+    - 504
+  models: {}
