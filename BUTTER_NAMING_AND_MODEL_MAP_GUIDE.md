@@ -170,24 +170,6 @@ providers:
       - key: ollama
         weight: 1
 
-  desktop-ollama:
-    base_url: http://100.113.98.79:11434/v1
-    keys:
-      - key: ollama
-        weight: 1
-
-  pccoder:
-    base_url: http://100.113.98.79:11491/v1
-    keys:
-      - key: local-only
-        weight: 1
-
-  pctalker:
-    base_url: http://100.113.98.79:11492/v1
-    keys:
-      - key: local-only
-        weight: 1
-
 routing:
   default_provider: openrouter
   failover:
@@ -226,24 +208,12 @@ routing:
       label: "Qwen 3 Coder 30B (Local)"
       family: qwen
 
-    "pctalker/qwen3-14b":
-      provider: pctalker
-      model: qwen3-14b
-      label: "Qwen 3 14B (Local)"
-      family: qwen
-
     # --- Ollama ---
     "ollama/llama3.2:3b":
       provider: ollama
       model: llama3.2:3b
       label: "Llama 3.2 3B (Local)"
       family: llama
-
-    "ollama/qwen3.5:2b":
-      provider: ollama
-      model: qwen3.5:2b
-      label: "Qwen 3.5 2B (Local)"
-      family: qwen
 
     # --- OpenRouter ---
     "openrouter/free":
