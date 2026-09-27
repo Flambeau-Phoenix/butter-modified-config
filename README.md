@@ -1,5 +1,5 @@
 # Butter Proxy 🧈
-
+based off https://github.com/temikus/butter
 > A blazingly fast, multi-provider AI proxy gateway in Go with **explicit provider namespacing**, **automatic payload model rewriting**, and a **curated multi-client model catalog**.
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org)
