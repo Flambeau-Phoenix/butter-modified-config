@@ -1,111 +1,134 @@
-# Butter AI Proxy: Unified Naming Scheme & Curated Model Map Guide
+# Butter AI Proxy: Unified Naming Scheme, Multi-Provider Routing & Curated Model Map Guide
 
 ## Executive Summary
 
-This document describes the redesigned configuration architecture and model registry for **Butter AI Proxy Gateway**. It solves two core architectural problems:
+This document describes the configuration architecture and model registry for **Butter AI Proxy Gateway**. It solves two core architectural problems:
 
-1. **Config Disconnect & Provider Ambiguity**: Previously, provider definitions lived at the top of `config.yaml` while model routes lived 100+ lines below with arbitrary IDs, no required provider linkage, and raw JSON pass-through without model rewriting.
-2. **Client-Side Name Guessing**: Downstream clients (Studio, chat interfaces, mobile, desktop) previously had to parse raw Butter handles with regex to guess friendly names and providers.
+1. **Config Disconnect & Provider Ambiguity**: Previously, provider definitions lived at the top of `config.yaml` while model routes lived with arbitrary IDs, no required provider linkage, and raw JSON pass-through without model rewriting.
+2. **Client-Side Name Guessing**: Downstream clients (Letta, chat interfaces, mobile, desktop, IDEs) previously had to parse raw model strings with regex to guess friendly names and providers.
 
 ### The Unified Design
 
-* **Every route entry requires a `provider` and an explicit prefix route `<provider>/<model>`**.
-* **Butter proxy automatically rewrites the outbound request body**, replacing the prefix route with the raw upstream `model` before sending to the upstream provider API.
+* **Every route entry defines its `provider` (or a `providers` failover list) and upstream `model`**.
+* **Butter proxy automatically rewrites the outbound request body**, replacing the virtual prefix route with the raw upstream `model` before sending to the upstream provider API.
 * **Both `GET /v1/models` and `GET /api/models` emit `{ id, owner, label, family }`**, allowing any client to immediately render clean labels and provider badges with zero string parsing.
-* **New model onboarding is one line in one place**.
-* A dedicated tool (`butterproxy_config_manager.py`) provides automated CLI and GUI management for the new schema.
+* **Support for `extra_body` injection**, allowing per-model Zero Data Retention (ZDR) and custom provider flags to be deep-merged directly into outbound requests.
+* **Multi-Provider Failover**: When multiple providers serve the same model (e.g. DeepSeek-V3 on DeepInfra and OpenRouter), a single shared virtual route automatically fails over upon 429 rate limits or 500 errors.
+* A dedicated tool (`butterproxy_config_manager.py`) provides automated CLI and GUI management for the schema.
 
 ---
 
 ## 1. The Architecture
 
-```
-┌────────────────────────────────────────────────────────────────────────┐
-│ Client Applications                                                    │
-│ (Studio, Chat WebUI, Phone, Desktop App, CLI)                          │
-│                                                                        │
-│ Reads: GET /api/models or GET /v1/models                               │
-│ Renders:                                                               │
-│   Label:  "Qwen 3 Coder 30B (Local)"                                   │
-│   Badge:  [PCCODER] (Family: qwen)                                     │
-│ Sends:    {"model": "pccoder/qwen3-coder-30b", "messages": [...]}      │
-└───────────────────────────────────▲────────────────────────────────────┘
-                                    │
-                                    │ HTTP :8080
-                                    │
-┌───────────────────────────────────┴────────────────────────────────────┐
-│ Butter AI Proxy Gateway                                                │
-│                                                                        │
-│ 1. Resolves route: "pccoder/qwen3-coder-30b"                           │
-│ 2. Finds target provider: "pccoder"                                    │
-│ 3. Rewrites outbound JSON: "model" -> "qwen3-coder-30b"                │
-│ 4. Injects provider auth & headers                                     │
-│ 5. Dispatches request to provider endpoint                             │
-└───────────────────────────────────▲────────────────────────────────────┘
-                                    │
-            ┌───────────────────────┼────────────────────────┐
-            │                       │                        │
-            ▼                       ▼                        ▼
-    [NVIDIA NIM Cloud]      [Local Workstation]       [Local Ollama]
-    https://integrate.      http://100.113.98.79:     http://127.0.0.1:
-    api.nvidia.com/v1       11491/v1 (pccoder)        11434/v1
-    Receives:               Receives:                 Receives:
-    {"model":"kimi-k3"}     {"model":"qwen3-coder-    {"model":"llama3.2:3b"}
-                            30b"}
+```text
++-------------------------------------------------------------------------+
+| Client Applications                                                     |
+| (Letta Desktop, Open WebUI, Mobile, Desktop App, Cursor, Python SDK)    |
+|                                                                         |
+| Reads: GET /api/models or GET /v1/models                                |
+| Renders:                                                                |
+|   Label:  "GPT-4o Mini (1min.AI)"                                       |
+|   Badge:  [ONEMIN] (Family: openai)                                     |
+| Sends:    {"model": "onemin/gpt-4o-mini", "messages": [...]}            |
++-------------------------------------------------------------------------+
+                                    |
+                                    | HTTP :8080
+                                    v
++-------------------------------------------------------------------------+
+| Butter AI Proxy Gateway                                                 |
+|                                                                         |
+| 1. Resolves route: "onemin/gpt-4o-mini"                                 |
+| 2. Finds target provider: "onemin"                                      |
+| 3. Rewrites outbound JSON: "model" -> "gpt-4o-mini"                     |
+| 4. Merges extra_body (if configured, e.g. ZDR flags)                    |
+| 5. Injects provider auth & headers                                      |
+| 6. Dispatches request to provider endpoint                              |
++-------------------------------------------------------------------------+
+                                    |
+            +-----------------------+-----------------------+
+            |                       |                       |
+            v                       v                       v
+    [1min.AI Gateway]       [DeepInfra / OpenRouter]     [Local Ollama Node]
+    https://api.1min.ai/    Cloud inference hubs         http://127.0.0.1:
+    openai/v1               Receives:                    11434/v1
+    Receives:               {"model":"deepseek-ai/       Receives:
+    {"model":"gpt-4o-mini"}  DeepSeek-V3"}               {"model":"llama3.2:3b"}
 ```
 
 ---
 
-## 2. The New Configuration Schema
+## 2. Configuration Schema & Routing Patterns
 
-In `config.yaml`, the `routing.models` section uses the following structured schema:
+In `config.yaml`, the `routing.models` section supports two core paradigms:
+
+### Pattern A: Explicit Namespaced Routes (`<provider>/<model>`)
+Used when you want downstream clients to explicitly choose the exact provider from their model dropdown list:
 
 ```yaml
 routing:
-  default_provider: openrouter
   models:
-    "<route_id>":
-      provider: <provider_name>      # REQUIRED: must exist in 'providers:'
-      model: <upstream_model_id>     # REQUIRED: raw model name sent to upstream API
-      label: "<Curated Label>"       # OPTIONAL: human-readable name (auto-derived if omitted)
-      family: <family_name>          # OPTIONAL: architecture family (auto-derived if omitted)
-      strategy: priority             # OPTIONAL: priority | round-robin | weighted
+    "onemin/gpt-4o-mini":
+      provider: onemin
+      model: gpt-4o-mini
+      label: "GPT-4o Mini (1min.AI)"
+      family: openai
+      strategy: priority
+
+    "openrouter/nousresearch/hermes-3-llama-3.1-405b":
+      provider: openrouter
+      model: nousresearch/hermes-3-llama-3.1-405b
+      label: "Hermes 3 405B (ZDR Restricted)"
+      family: llama
+      strategy: priority
+      extra_body:
+        provider:
+          zdr: true
+          data_collection: "deny"
+          require_parameters: false
 ```
 
-### Key Rules
+### Pattern B: Shared Virtual Model with Multi-Provider Failover
+Used when multiple providers host the same model (e.g. DeepSeek-V3), and you want high availability:
 
-1. **Prefix Route Convention**: The `<route_id>` is namespaced as `<provider>/<model>` (e.g. `nvidia/kimi-k3`, `pccoder/qwen3-coder-30b`, `ollama/llama3.2:3b`).
-2. **Provider Enforcement**: Each entry explicitly designates its `provider`. A route cannot exist without a valid provider defined in the `providers:` block.
-3. **Upstream Rewriting**: The `model` field is what the upstream provider expects. For example, Nvidia expects `kimi-k3`, while Butter exposes `nvidia/kimi-k3`. Butter automatically translates the request body before transmitting.
-4. **Curated Metadata**: `label` and `family` are stored right alongside the route and broadcast to all clients via `/v1/models` and `/api/models`.
+```yaml
+routing:
+  models:
+    "deepseek-chat":
+      providers: [deepinfra, openrouter]
+      model: deepseek-ai/DeepSeek-V3
+      label: "DeepSeek V3 (Auto-Failover)"
+      family: deepseek
+      strategy: priority
+```
+When a client requests `{"model": "deepseek-chat"}`, Butter attempts `deepinfra`. If DeepInfra returns HTTP 429, 500, or 503, Butter automatically dispatches to `openrouter`, rewriting the upstream model accordingly.
 
 ---
 
 ## 3. The Curated Catalog API (`/v1/models` & `/api/models`)
 
-Both `GET /v1/models` and `GET /api/models` return the enhanced model schema:
+Both `GET /v1/models` and `GET /api/models` return the enriched model schema:
 
 ```json
 {
   "object": "list",
   "data": [
     {
-      "id": "nvidia/kimi-k3",
+      "id": "onemin/gpt-4o-mini",
       "object": "model",
       "created": 0,
-      "owned_by": "nvidia",
-      "owner": "nvidia",
-      "label": "Kimi K3",
-      "family": "kimi"
+      "owned_by": "onemin",
+      "owner": "onemin",
+      "label": "GPT-4o Mini (1min.AI)",
+      "family": "openai"
     },
     {
-      "id": "pccoder/qwen3-coder-30b",
+      "id": "deepseek-chat",
       "object": "model",
       "created": 0,
-      "owned_by": "pccoder",
-      "owner": "pccoder",
-      "label": "Qwen 3 Coder 30B (Local)",
-      "family": "qwen"
+      "owned_by": "deepinfra",
+      "owner": "deepinfra",
+      "label": "DeepSeek V3 (Auto-Failover)",
+      "family": "deepseek"
     },
     {
       "id": "ollama/llama3.2:3b",
@@ -120,112 +143,23 @@ Both `GET /v1/models` and `GET /api/models` return the enhanced model schema:
 }
 ```
 
-### Client Integration Example (JavaScript / TypeScript)
-
-Clients no longer need regex or string manipulation:
+### Client Integration Example (TypeScript / JavaScript)
 
 ```typescript
-// Fetch from Butter
+// Fetch curated catalog from Butter
 const res = await fetch("http://127.0.0.1:8080/api/models");
 const { data: models } = await res.json();
 
 // Render dropdown options
 models.forEach((m) => {
   console.log(`Option: ${m.label} | Badge: [${m.owner.toUpperCase()}] | Family: ${m.family}`);
-  // Wire ID sent to /v1/chat/completions: m.id (e.g. "nvidia/kimi-k3")
+  // Wire ID sent to /v1/chat/completions: m.id (e.g. "onemin/gpt-4o-mini" or "deepseek-chat")
 });
 ```
 
 ---
 
-## 4. Complete `config.yaml` Example
-
-```yaml
-server:
-  address: "127.0.0.1:8080"
-  read_timeout: 30s
-  write_timeout: 120s
-  read_header_timeout: 10s
-  idle_timeout: 120s
-  max_header_bytes: 1048576
-  max_request_bytes: 33554432
-
-providers:
-  nvidia:
-    base_url: https://integrate.api.nvidia.com/v1
-    keys:
-      - key: "${NVIDIA_API_KEY}"
-        weight: 1
-
-  openrouter:
-    base_url: https://openrouter.ai/api/v1
-    credential_mode: passthrough
-    keys:
-      - key: "${OPENROUTER_API_KEY}"
-        weight: 1
-
-  ollama:
-    base_url: http://127.0.0.1:11434/v1
-    keys:
-      - key: ollama
-        weight: 1
-
-routing:
-  default_provider: openrouter
-  failover:
-    enabled: true
-    max_retries: 2
-    backoff:
-      initial: 100ms
-      multiplier: 2.0
-      max: 2s
-    retry_on: [429, 500, 502, 503, 504]
-
-  models:
-    # --- NVIDIA ---
-    "nvidia/kimi-k3":
-      provider: nvidia
-      model: kimi-k3
-      label: "Kimi K3"
-      family: kimi
-
-    "nvidia/glm-5-3":
-      provider: nvidia
-      model: glm-5-3
-      label: "GLM 5.3"
-      family: glm
-
-    "nvidia/glm-5-3-flash":
-      provider: nvidia
-      model: glm-5-3-flash
-      label: "GLM 5.3 Flash"
-      family: glm
-
-    # --- Local Tailnet Workstation (pccoder / pctalker) ---
-    "pccoder/qwen3-coder-30b":
-      provider: pccoder
-      model: qwen3-coder-30b
-      label: "Qwen 3 Coder 30B (Local)"
-      family: qwen
-
-    # --- Ollama ---
-    "ollama/llama3.2:3b":
-      provider: ollama
-      model: llama3.2:3b
-      label: "Llama 3.2 3B (Local)"
-      family: llama
-
-    # --- OpenRouter ---
-    "openrouter/free":
-      provider: openrouter
-      model: openrouter/free
-      label: "OpenRouter Free"
-      family: openrouter
-```
-
----
-
-## 5. Configuration Manager Tool (`butterproxy_config_manager.py`)
+## 4. Configuration Manager CLI (`butterproxy_config_manager.py`)
 
 A single-file Python tool is provided to manage the configuration locally or over SSH.
 
@@ -233,91 +167,42 @@ A single-file Python tool is provided to manage the configuration locally or ove
 
 #### 1. Add or Update a Model Route
 ```bash
+# Add a single namespaced route
 python butterproxy_config_manager.py add-route \
-  --provider nvidia \
-  --model kimi-k3 \
-  --route nvidia/kimi-k3 \
-  --label "Kimi K3" \
-  --family kimi
-```
-*If `--route`, `--label`, or `--family` are omitted, they are automatically derived.*
+  --provider onemin \
+  --model gpt-4o-mini \
+  --route onemin/gpt-4o-mini \
+  --label "GPT-4o Mini (1min.AI)" \
+  --family openai
 
-#### 2. List All Active Routes
-```bash
-python butterproxy_config_manager.py list-routes
-```
-Output:
-```text
-ROUTE ID                            PROVIDER        UPSTREAM MODEL                 LABEL                     FAMILY    
--------------------------------------------------------------------------------------------------------------------
-nvidia/kimi-k3                      nvidia          kimi-k3                        Kimi K3                   kimi      
-nvidia/glm-5-3                      nvidia          glm-5-3                        GLM 5.3                   glm       
-pccoder/qwen3-coder-30b             pccoder         qwen3-coder-30b                Qwen 3 Coder 30B (Local)  qwen      
-ollama/llama3.2:3b                  ollama          llama3.2:3b                    Llama 3.2 3B (Local)      llama     
-```
+# Add a multi-provider failover route
+python butterproxy_config_manager.py add-route \
+  --providers deepinfra openrouter \
+  --model deepseek-ai/DeepSeek-V3 \
+  --route deepseek-chat \
+  --label "DeepSeek V3 (Failover)" \
+  --family deepseek
 
-To output as JSON:
-```bash
-python butterproxy_config_manager.py list-routes --json
+# Add a route with Zero Data Retention (extra_body)
+python butterproxy_config_manager.py add-route \
+  --provider openrouter \
+  --model nousresearch/hermes-3-llama-3.1-405b \
+  --extra-body '{"provider": {"zdr": true, "data_collection": "deny"}}'
 ```
 
-#### 3. Remove a Route
-```bash
-python butterproxy_config_manager.py remove-route --route nvidia/kimi-k3
-```
-
-#### 4. Sync Catalogs from Endpoints
-Automatically discovers models from all configured providers, namespaces them under `<provider>/<model>`, derives labels and families, and updates `config.yaml`:
-```bash
-python butterproxy_config_manager.py sync
-```
-
-#### 5. Generate a Starter Template
-```bash
-python butterproxy_config_manager.py generate-template --output config.yaml
-```
-
-#### 6. Validate Configuration
+#### 2. Validate Configuration
 ```bash
 python butterproxy_config_manager.py validate --config config.yaml
 ```
 
-### Graphical User Interface (GUI)
-Launch the desktop GUI:
+#### 3. List All Configured Routes
 ```bash
-python butterproxy_config_manager.py gui
-```
-Features:
-* View and toggle models by provider.
-* Configure remote SSH/SFTP connection to `ollama-box` or Tailnet nodes.
-* Edit YAML live with validation and automatic service restart.
-
----
-
-## 6. Build & Deployment
-
-To deploy updates on `ollama-box` or any Linux gateway host:
-
-```bash
-# Run tests, compile binary, back up old binary, install to /usr/local/bin/butter, restart systemd
-./deploy.sh
+python butterproxy_config_manager.py list-routes --config config.yaml
 ```
 
-Or build and test without modifying the running service:
+#### 4. Auto-Discover Upstream Models
 ```bash
-./deploy.sh --no-deploy
-```
-
-### Verification
-```bash
-# Verify model listing with metadata
-curl -s http://127.0.0.1:8080/v1/models | jq .
-
-# Verify chat completion with route rewriting
-curl -s http://127.0.0.1:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "nvidia/kimi-k3",
-    "messages": [{"role": "user", "content": "Hello!"}]
-  }' | jq .
+python butterproxy_config_manager.py discover \
+  --base-url https://api.1min.ai/openai/v1 \
+  --api-key-env ONEMIN_AI_API_KEY
 ```

@@ -1,13 +1,17 @@
 # ==============================================================================
-# Butter AI Proxy Gateway - Unified Configuration
+# Butter AI Proxy Gateway - Reference Configuration
 # ==============================================================================
 # In this schema:
-#   1. Every routed model entry explicitly defines its 'provider'.
-#   2. The route key is namespaced as '<provider>/<model_id>' (the prefix route).
-#   3. 'model' specifies the raw model ID forwarded to the provider API.
-#   4. 'label' and 'family' are published via GET /v1/models and GET /api/models
-#      so downstream clients (Studio, chat, mobile, desktop) render clean badges
-#      and human-readable names automatically.
+#   1. Providers define upstream API endpoints and authentication credentials.
+#   2. Models are mapped under 'routing.models':
+#      - Pattern A: Namespaced routes ('<provider>/<model_id>') for explicit
+#        downstream selection (Butter transparently rewrites 'model' upstream).
+#      - Pattern B: Shared virtual models ('deepseek-chat') with multi-provider
+#        failover ('providers: [deepinfra, openrouter]').
+#   3. Curated metadata ('label', 'family') is broadcast via GET /v1/models and
+#      GET /api/models for clean client UI display.
+#   4. 'extra_body' allows injecting arbitrary upstream JSON parameters
+#      (e.g., OpenRouter Zero Data Retention: {provider: {zdr: true}}).
 # ==============================================================================
 
 server:
@@ -20,75 +24,37 @@ server:
   max_request_bytes: 33554432
 
 providers:
-  # --- Cloud Aggregators & APIs ---
+  # --- Cloud Aggregators & Inference Gateways ---
   openrouter:
     base_url: https://openrouter.ai/api/v1
     credential_mode: passthrough
-    headers:
-      User-Agent: opencode/2.0.11
-      HTTP-Referer: https://opencode.ai
-      X-Title: opencode
     keys:
       - key: "${OPENROUTER_API_KEY}"
         weight: 1
 
-  nvidia:
-    base_url: https://integrate.api.nvidia.com/v1
+  deepinfra:
+    base_url: https://api.deepinfra.com/v1/openai
     keys:
-      - key: "${NVIDIA_API_KEY}"
+      - key: "${DEEPINFRA_API_KEY}"
         weight: 1
 
-  kilo:
-    base_url: http://hermes.ai.unturf.com/v1
+  onemin:
+    base_url: https://api.1min.ai/openai/v1
     keys:
-      - key: "${KILO_API_KEY}"
+      - key: "${ONEMIN_AI_API_KEY}"
         weight: 1
 
-  opencode:
-    base_url: https://opencode.ai/zen/go/v1
-    headers:
-      x-opencode-session: session-default
-    keys:
-      - key: "${OPENCODE_API_KEY}"
-        weight: 1
-
-  opencode-zen:
-    base_url: https://opencode.ai/zen/v1
-    headers:
-      User-Agent: opencode/2.0.11
-    keys:
-      - key: "${OPENCODE_API_KEY}"
-        weight: 1
-
-  # --- Local Tailnet & LAN Inference Nodes ---
+  # --- Local & LAN Inference Nodes ---
   ollama:
     base_url: http://127.0.0.1:11434/v1
     keys:
       - key: ollama
         weight: 1
 
-  desktop-ollama:
-    base_url: http://100.113.98.79:11434/v1
+  vllm-local:
+    base_url: http://127.0.0.1:8000/v1
     keys:
-      - key: ollama
-        weight: 1
-
-  pccoder:
-    base_url: http://100.113.98.79:11491/v1
-    keys:
-      - key: local-only
-        weight: 1
-
-  pctalker:
-    base_url: http://100.113.98.79:11492/v1
-    keys:
-      - key: local-only
-        weight: 1
-
-  pctalker-v2:
-    base_url: http://100.113.98.79:11493/v1
-    keys:
-      - key: local-only
+      - key: none
         weight: 1
 
 routing:
@@ -104,112 +70,99 @@ routing:
     retry_on: [429, 500, 502, 503, 504]
 
   models:
-    # --------------------------------------------------------------------------
-    # Format:
-    #   "<prefix_route>":
-    #     provider: <provider_name>       # REQUIRED: matches key in providers
-    #     model: <upstream_model_id>      # REQUIRED: target model ID for provider
-    #     label: "<Human Readable Name>"  # Curated label for clients
-    #     family: <family_name>           # Model family (qwen, llama, kimi, glm)
-    #     strategy: priority              # Optional: priority | round-robin
-    # --------------------------------------------------------------------------
+    # ==========================================================================
+    # PATTERN 1: Explicit Provider Namespacing (<provider>/<upstream_model>)
+    # Client requests 'onemin/gpt-4o-mini' -> Butter rewrites model to 'gpt-4o-mini'
+    # ==========================================================================
 
-    # --- NVIDIA Endpoints ---
-    "nvidia/kimi-k3":
-      provider: nvidia
-      model: kimi-k3
-      label: "Kimi K3"
-      family: kimi
+    # --- 1min.AI Gateway Routes ---
+    "onemin/gpt-4o-mini":
+      provider: onemin
+      model: gpt-4o-mini
+      label: "GPT-4o Mini (1min.AI)"
+      family: openai
+      strategy: priority
 
-    "nvidia/glm-5-3":
-      provider: nvidia
-      model: glm-5-3
-      label: "GLM 5.3"
-      family: glm
+    "onemin/claude-3-5-sonnet":
+      provider: onemin
+      model: claude-3-5-sonnet
+      label: "Claude 3.5 Sonnet (1min.AI)"
+      family: claude
+      strategy: priority
 
-    "nvidia/glm-5-3-flash":
-      provider: nvidia
-      model: glm-5-3-flash
-      label: "GLM 5.3 Flash"
-      family: glm
+    "onemin/qwen3.7-flash":
+      provider: onemin
+      model: qwen3.7-flash
+      label: "Qwen 3.7 Flash (1min.AI)"
+      family: qwen
+      strategy: priority
 
-    "nvidia/deepseek-v4.1-flash":
-      provider: nvidia
-      model: deepseek-ai/deepseek-v4.1-flash
-      label: "DeepSeek V4.1 Flash"
+    # --- DeepInfra Direct Routes ---
+    "deepinfra/deepseek-ai/DeepSeek-V3":
+      provider: deepinfra
+      model: deepseek-ai/DeepSeek-V3
+      label: "DeepSeek V3 (DeepInfra)"
       family: deepseek
+      strategy: priority
 
-    # --- Local Tailnet Workstations (pccoder, pctalker) ---
-    "pccoder/qwen3-coder-30b":
-      provider: pccoder
-      model: qwen3-coder-30b
-      label: "Qwen 3 Coder 30B (Local)"
+    "deepinfra/Qwen/Qwen2.5-72B-Instruct":
+      provider: deepinfra
+      model: Qwen/Qwen2.5-72B-Instruct
+      label: "Qwen 2.5 72B Instruct (DeepInfra)"
       family: qwen
+      strategy: priority
 
-    "pctalker/qwen3-14b":
-      provider: pctalker
-      model: qwen3-14b
-      label: "Qwen 3 14B (Local)"
-      family: qwen
+    # --- OpenRouter Cloud Routes (with Zero Data Retention extra_body) ---
+    "openrouter/nousresearch/hermes-3-llama-3.1-405b":
+      provider: openrouter
+      model: nousresearch/hermes-3-llama-3.1-405b
+      label: "Hermes 3 405B (ZDR Restricted)"
+      family: llama
+      strategy: priority
+      extra_body:
+        provider:
+          zdr: true
+          data_collection: "deny"
+          require_parameters: false
 
-    "pctalker-v2/qwen2.5-7b":
-      provider: pctalker-v2
-      model: qwen2.5-7b
-      label: "Qwen 2.5 7B (Local)"
-      family: qwen
+    "openrouter/anthropic/claude-3.5-sonnet":
+      provider: openrouter
+      model: anthropic/claude-3.5-sonnet
+      label: "Claude 3.5 Sonnet (OpenRouter)"
+      family: claude
+      strategy: priority
 
-    # --- Local Ollama Instances ---
+    # --- Local Inference Routes (Ollama / vLLM) ---
     "ollama/llama3.2:3b":
       provider: ollama
       model: llama3.2:3b
-      label: "Llama 3.2 3B (Local)"
+      label: "Llama 3.2 3B (Local Ollama)"
       family: llama
+      strategy: priority
 
-    "ollama/qwen3.5:2b":
+    "ollama/qwen2.5-coder:32b":
       provider: ollama
-      model: qwen3.5:2b
-      label: "Qwen 3.5 2B (Local)"
+      model: qwen2.5-coder:32b
+      label: "Qwen 2.5 Coder 32B (Local Ollama)"
       family: qwen
+      strategy: priority
 
-    "desktop-ollama/llama3.2:3b":
-      provider: desktop-ollama
-      model: llama3.2:3b
-      label: "Llama 3.2 3B (Desktop)"
+    "vllm-local/meta-llama/Llama-3.3-70B-Instruct":
+      provider: vllm-local
+      model: meta-llama/Llama-3.3-70B-Instruct
+      label: "Llama 3.3 70B Instruct (Local vLLM)"
       family: llama
+      strategy: priority
 
-    "desktop-ollama/dolphin-mistral:7b":
-      provider: desktop-ollama
-      model: dolphin-mistral:7b
-      label: "Dolphin Mistral 7B"
-      family: mistral
-
-    # --- OpenRouter & Kilo Cloud Routes ---
-    "openrouter/free":
-      provider: openrouter
-      model: openrouter/free
-      label: "OpenRouter Free"
-      family: openrouter
-
-    "openrouter/gpt-oss-20b":
-      provider: openrouter
-      model: openai/gpt-oss-20b
-      label: "GPT OSS 20B"
-      family: gpt
-
-    "kilo/glm-5.2:free":
-      provider: kilo
-      model: z-ai/glm-5.2:free
-      label: "GLM 5.2 (Free)"
-      family: glm
-
-    "kilo/ling-3.0-flash-vl:free":
-      provider: kilo
-      model: inclusionai/ling-3.0-flash-vl:free
-      label: "Ling 3.0 Flash VL"
-      family: other
-
-    "opencode/muse-spark-1.3":
-      provider: opencode
-      model: muse-spark-1.3
-      label: "Muse Spark 1.3"
-      family: other
+    # ==========================================================================
+    # PATTERN 2: Shared Virtual Model with Multi-Provider Failover
+    # Downstream clients request generic model ID 'deepseek-chat'.
+    # Butter attempts deepinfra first; on 429/500 it automatically fails over
+    # to openrouter, rewriting the model ID on the fly.
+    # ==========================================================================
+    "deepseek-chat":
+      providers: [deepinfra, openrouter]
+      model: deepseek-ai/DeepSeek-V3
+      label: "DeepSeek V3 (Multi-Provider Failover)"
+      family: deepseek
+      strategy: priority

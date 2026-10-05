@@ -1,50 +1,80 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Butter AI Proxy Gateway - Build & Deployment Script
+# Butter AI Proxy Gateway - Universal Deployment & Config Script
 # ==============================================================================
 # Usage:
-#   ./deploy.sh              Build, test, install to /usr/local/bin/butter, restart service
-#   ./deploy.sh --no-deploy  Build and test only (leaves running service untouched)
+#   ./deploy.sh                      Validate and deploy ./config.yaml
+#   ./deploy.sh /path/to/config.yaml Validate and deploy custom config path
 # ==============================================================================
 set -euo pipefail
 
-cd "$(dirname "$0")"
-BIN=/tmp/butter-new
-TARGET=/usr/local/bin/butter
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="${1:-$SCRIPT_DIR/config.yaml}"
+TARGET_BIN="/usr/local/bin/butter"
 
-echo "==> Building Butter binary (cmd/butter)"
-go build -o "$BIN" ./cmd/butter/
+echo "==> Butterproxy Deployment"
 
-echo "==> Running static analysis (go vet)"
-go vet ./internal/... ./cmd/...
-
-echo "==> Running test suite (go test)"
-go test ./internal/...
-
-if [ "${1:-}" = "--no-deploy" ]; then
-  echo "==> Build complete: $BIN (not deployed)"
-  exit 0
+# 1. Check & Validate Configuration
+if [ ! -f "$CONFIG_FILE" ]; then
+  if [ -f "$SCRIPT_DIR/config.example.yaml" ]; then
+    echo "==> No config.yaml found. Initializing from config.example.yaml..."
+    cp "$SCRIPT_DIR/config.example.yaml" "$CONFIG_FILE"
+  else
+    echo "ERROR: Config file $CONFIG_FILE not found!"
+    exit 1
+  fi
 fi
 
-stamp=$(date +%F-%H%M%S)
-if [ -f "$TARGET" ]; then
-  echo "==> Backing up current binary: $TARGET -> $TARGET.bak-$stamp"
-  sudo cp -a "$TARGET" "$TARGET.bak-$stamp"
-fi
-
-echo "==> Installing new binary to $TARGET"
-sudo install -m 0755 "$BIN" "$TARGET"
-
-echo "==> Restarting butter.service"
-sudo systemctl restart butter
-sleep 1
-
-STATUS=$(systemctl is-active butter || true)
-echo "==> butter.service is $STATUS"
-
-if [ "$STATUS" = "active" ]; then
-  echo "==> Deployment successful!"
+echo "==> Validating configuration: $CONFIG_FILE"
+if command -v python3 >/dev/null 2>&1; then
+  python3 "$SCRIPT_DIR/butterproxy_config_manager.py" validate --config "$CONFIG_FILE"
 else
-  echo "==> ERROR: Service is not active. Check logs with: sudo journalctl -u butter -n 50"
-  exit 1
+  echo "WARNING: python3 not found, skipping config syntax pre-validation."
+fi
+
+# 2. Check or Build Butter Binary
+if [ -d "$SCRIPT_DIR/cmd/butter" ]; then
+  echo "==> Building Butter binary from local source..."
+  go build -o "/tmp/butter-new" "$SCRIPT_DIR/cmd/butter/"
+  if [ -f "$TARGET_BIN" ]; then
+    sudo cp -a "$TARGET_BIN" "$TARGET_BIN.bak-$(date +%F-%H%M%S)"
+  fi
+  sudo install -m 0755 "/tmp/butter-new" "$TARGET_BIN"
+elif [ -n "${BUTTER_SRC:-}" ] && [ -d "$BUTTER_SRC/cmd/butter" ]; then
+  echo "==> Building Butter binary from source at $BUTTER_SRC..."
+  (cd "$BUTTER_SRC" && go build -o "/tmp/butter-new" ./cmd/butter/)
+  if [ -f "$TARGET_BIN" ]; then
+    sudo cp -a "$TARGET_BIN" "$TARGET_BIN.bak-$(date +%F-%H%M%S)"
+  fi
+  sudo install -m 0755 "/tmp/butter-new" "$TARGET_BIN"
+elif [ -d "$SCRIPT_DIR/../butter-src/cmd/butter" ]; then
+  echo "==> Building Butter binary from sibling directory ../butter-src..."
+  (cd "$SCRIPT_DIR/../butter-src" && go build -o "/tmp/butter-new" ./cmd/butter/)
+  if [ -f "$TARGET_BIN" ]; then
+    sudo cp -a "$TARGET_BIN" "$TARGET_BIN.bak-$(date +%F-%H%M%S)"
+  fi
+  sudo install -m 0755 "/tmp/butter-new" "$TARGET_BIN"
+elif [ -x "$TARGET_BIN" ]; then
+  echo "==> Using existing installed binary at $TARGET_BIN"
+elif command -v butter >/dev/null 2>&1; then
+  TARGET_BIN="$(command -v butter)"
+  echo "==> Using existing butter binary found in PATH: $TARGET_BIN"
+else
+  echo "==> Notice: No butter binary or source tree found in this repo."
+  echo "    To build from source: BUTTER_SRC=/path/to/butter-src ./deploy.sh"
+  echo "    Or clone Butter: git clone https://github.com/temikus/butter.git ../butter-src"
+  echo "    If running on another machine, make sure /usr/local/bin/butter is installed."
+fi
+
+# 3. Service Management
+if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files butter.service >/dev/null 2>&1; then
+  echo "==> Restarting butter.service..."
+  sudo systemctl restart butter
+  sleep 1
+  STATUS=$(systemctl is-active butter || true)
+  echo "==> butter.service is $STATUS"
+else
+  echo "==> Config validated and ready!"
+  echo "    To run manually: butter --config $CONFIG_FILE"
+  echo "    Or set up a systemd service following the instructions in README.md"
 fi

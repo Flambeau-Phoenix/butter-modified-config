@@ -144,7 +144,7 @@ DEFAULT_FAILOVER_BLOCK = {
 }
 
 DEFAULT_CONFIG_TEMPLATE = """# Butter AI Proxy Gateway Configuration
-# Clean unified naming schema: each route entry requires a provider, prefix route, and upstream model.
+# Clean unified naming schema: each route entry requires a provider (or providers list), prefix route, and upstream model.
 
 server:
   address: "127.0.0.1:8080"
@@ -156,12 +156,6 @@ server:
   max_request_bytes: 33554432
 
 providers:
-  nvidia:
-    base_url: https://integrate.api.nvidia.com/v1
-    keys:
-      - key: "${NVIDIA_API_KEY}"
-        weight: 1
-
   openrouter:
     base_url: https://openrouter.ai/api/v1
     credential_mode: passthrough
@@ -169,16 +163,22 @@ providers:
       - key: "${OPENROUTER_API_KEY}"
         weight: 1
 
+  deepinfra:
+    base_url: https://api.deepinfra.com/v1/openai
+    keys:
+      - key: "${DEEPINFRA_API_KEY}"
+        weight: 1
+
+  onemin:
+    base_url: https://api.1min.ai/openai/v1
+    keys:
+      - key: "${ONEMIN_AI_API_KEY}"
+        weight: 1
+
   ollama:
     base_url: http://127.0.0.1:11434/v1
     keys:
       - key: ollama
-        weight: 1
-
-  pccoder:
-    base_url: http://100.113.98.79:11491/v1
-    keys:
-      - key: local-only
         weight: 1
 
 routing:
@@ -193,42 +193,46 @@ routing:
     retry_on: [429, 500, 502, 503, 504]
 
   models:
-    # Format:
-    # <route_id>:
-    #   provider: <provider_name>      (REQUIRED)
-    #   model: <upstream_model_id>     (Sent to provider API)
-    #   label: <human_friendly_label>  (Emitted to /v1/models and /api/models)
-    #   family: <model_family>         (e.g. qwen, llama, kimi, glm, deepseek)
+    # --------------------------------------------------------------------------
+    # Pattern 1: Namespaced Routes (<provider>/<model>)
+    # Butter rewrites the model parameter to upstream model ID before dispatch.
+    # --------------------------------------------------------------------------
+    "onemin/gpt-4o-mini":
+      provider: onemin
+      model: gpt-4o-mini
+      label: "GPT-4o Mini (1min.AI)"
+      family: openai
+      strategy: priority
 
-    "nvidia/kimi-k3":
-      provider: nvidia
-      model: kimi-k3
-      label: "Kimi K3"
-      family: kimi
-
-    "nvidia/glm-5-3":
-      provider: nvidia
-      model: glm-5-3
-      label: "GLM 5.3"
-      family: glm
-
-    "pccoder/qwen3-coder-30b":
-      provider: pccoder
-      model: qwen3-coder-30b
-      label: "Qwen 3 Coder 30B (Local)"
-      family: qwen
+    "openrouter/nousresearch/hermes-3-llama-3.1-405b":
+      provider: openrouter
+      model: nousresearch/hermes-3-llama-3.1-405b
+      label: "Hermes 3 405B (ZDR Restricted)"
+      family: llama
+      strategy: priority
+      extra_body:
+        provider:
+          zdr: true
+          data_collection: "deny"
+          require_parameters: false
 
     "ollama/llama3.2:3b":
       provider: ollama
       model: llama3.2:3b
-      label: "Llama 3.2 3B"
+      label: "Llama 3.2 3B (Local)"
       family: llama
 
-    "openrouter/free":
-      provider: openrouter
-      model: openrouter/free
-      label: "OpenRouter Free"
-      family: openrouter
+    # --------------------------------------------------------------------------
+    # Pattern 2: Shared Virtual Route with Multi-Provider Failover
+    # Downstream clients request 'deepseek-chat'. Butter tries DeepInfra first;
+    # if it returns 429/500, it automatically fails over to OpenRouter.
+    # --------------------------------------------------------------------------
+    "deepseek-chat":
+      providers: [deepinfra, openrouter]
+      model: deepseek-ai/DeepSeek-V3
+      label: "DeepSeek V3 (Auto-Failover)"
+      family: deepseek
+      strategy: priority
 """
 
 
@@ -503,6 +507,16 @@ def validate_butter_config(config: dict[str, Any], strict: bool = True) -> None:
                                 raise ButterConfigError(
                                     f"Model route {model_id!r} references undefined provider {p!r}"
                                 )
+                        extra_body = route.get("extra_body")
+                        if extra_body is not None:
+                            if not isinstance(extra_body, dict):
+                                raise ButterConfigError(
+                                    f"Model route {model_id!r} extra_body must be a mapping"
+                                )
+                            if "model" in extra_body:
+                                raise ButterConfigError(
+                                    f"Model route {model_id!r} extra_body cannot override 'model'"
+                                )
 
 
 def load_config_file(path: Path) -> dict[str, Any]:
@@ -726,33 +740,68 @@ def delete_provider(config: dict[str, Any], name: str) -> None:
 def apply_route(
     config: dict[str, Any],
     *,
-    provider: str,
+    provider: str | None = None,
+    providers: list[str] | None = None,
     model: str,
     route_id: str | None = None,
     label: str | None = None,
     family: str | None = None,
     strategy: str = "priority",
+    extra_body: dict[str, Any] | None = None,
 ) -> str:
-    provider = validate_provider_name(provider)
-    providers = config.get("providers")
-    if not isinstance(providers, dict) or provider not in providers:
-        raise ButterConfigError(f"Provider {provider!r} is not defined in providers section")
+    all_providers = config.get("providers")
+    if not isinstance(all_providers, dict):
+        raise ButterConfigError("Butter config must contain a providers section")
+
+    target_providers: list[str] = []
+    if providers:
+        target_providers = [validate_provider_name(p) for p in providers if p]
+    elif provider:
+        target_providers = [validate_provider_name(provider)]
+    else:
+        raise ButterConfigError("Route must specify --provider or --providers")
+
+    for p in target_providers:
+        if p not in all_providers:
+            norm_p = normalize_provider_name(p)
+            if norm_p not in all_providers:
+                raise ButterConfigError(f"Provider {p!r} is not defined in providers section")
+
     clean_model = model.strip()
     if not clean_model:
         raise ButterConfigError("Model ID cannot be empty")
-    canonical_route, upstream = normalize_route_and_upstream(provider, clean_model)
-    clean_route = (route_id or canonical_route).strip()
+
+    primary_prov = target_providers[0]
+    canonical_route, upstream = normalize_route_and_upstream(primary_prov, clean_model)
+    clean_route = (route_id or (clean_model if len(target_providers) > 1 else canonical_route)).strip()
     clean_label = (label or derive_model_label(upstream)).strip()
     clean_family = (family or derive_model_family(upstream)).strip()
 
     routes = get_routes(config, create=True)
-    routes[clean_route] = {
-        "provider": provider,
+    existing_route = routes.get(clean_route, {})
+    if not isinstance(existing_route, dict):
+        existing_route = {}
+
+    route_entry: dict[str, Any] = {
         "model": upstream,
         "label": clean_label,
         "family": clean_family,
         "strategy": strategy,
     }
+    if len(target_providers) > 1:
+        route_entry["providers"] = target_providers
+    else:
+        route_entry["provider"] = target_providers[0]
+
+    # Preserve or assign extra_body
+    if extra_body is not None:
+        if not isinstance(extra_body, dict):
+            raise ButterConfigError("extra_body must be a mapping")
+        route_entry["extra_body"] = extra_body
+    elif "extra_body" in existing_route:
+        route_entry["extra_body"] = existing_route["extra_body"]
+
+    routes[clean_route] = route_entry
     return clean_route
 
 
@@ -771,16 +820,20 @@ def list_routes(config: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(route, dict):
             continue
         providers = normalize_route_providers(route)
-        prov = providers[0] if providers else ""
-        upstream = route.get("model") or route_id.removeprefix(f"{prov}/")
-        result.append({
+        prov = ", ".join(providers) if len(providers) > 1 else (providers[0] if providers else "")
+        primary = providers[0] if providers else ""
+        upstream = route.get("model") or route_id.removeprefix(f"{primary}/")
+        entry = {
             "route_id": route_id,
             "provider": prov,
             "model": upstream,
             "label": route.get("label") or derive_model_label(upstream),
             "family": route.get("family") or derive_model_family(upstream),
             "strategy": route.get("strategy", "priority"),
-        })
+        }
+        if "extra_body" in route:
+            entry["extra_body"] = route["extra_body"]
+        result.append(entry)
     return result
 
 
@@ -2057,14 +2110,19 @@ def build_parser() -> argparse.ArgumentParser:
     summary = commands.add_parser("summary", help="Print redacted config summary")
     summary.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
 
+    validate_cmd = commands.add_parser("validate", help="Validate Butter configuration syntax")
+    validate_cmd.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+
     add_route_cmd = commands.add_parser("add-route", help="Add or update a routed model entry")
     add_route_cmd.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
-    add_route_cmd.add_argument("--provider", required=True, help="Provider name (must be in providers block)")
+    add_route_cmd.add_argument("--provider", help="Single provider name (must be in providers block)")
+    add_route_cmd.add_argument("--providers", nargs="+", help="Multiple provider names for shared model failover")
     add_route_cmd.add_argument("--model", required=True, help="Upstream model ID")
     add_route_cmd.add_argument("--route", help="Prefix route ID (defaults to <provider>/<model>)")
     add_route_cmd.add_argument("--label", help="Curated human label")
     add_route_cmd.add_argument("--family", help="Architecture family (e.g. qwen, llama, kimi)")
     add_route_cmd.add_argument("--strategy", default="priority", help="Strategy (default: priority)")
+    add_route_cmd.add_argument("--extra-body", help="JSON string of arbitrary extra parameters to inject (e.g. ZDR)")
 
     list_routes_cmd = commands.add_parser("list-routes", help="List all configured routes and their metadata")
     list_routes_cmd.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
@@ -2125,18 +2183,29 @@ def run_cli(args: argparse.Namespace) -> int:
         return 0
     if args.command == "add-route":
         config = load_config_file(args.config)
+        extra_body = None
+        if getattr(args, "extra_body", None):
+            try:
+                extra_body = json.loads(args.extra_body)
+            except json.JSONDecodeError as exc:
+                raise ButterConfigError(f"Invalid JSON for --extra-body: {exc}") from exc
+            if not isinstance(extra_body, dict):
+                raise ButterConfigError("--extra-body must parse to a JSON object")
         route_id = apply_route(
             config,
             provider=args.provider,
+            providers=args.providers,
             model=args.model,
             route_id=args.route,
             label=args.label,
             family=args.family,
             strategy=args.strategy,
+            extra_body=extra_body,
         )
         validate_butter_config(config, strict=True)
         atomic_write_text(args.config, dump_config(config), backup=True)
-        print(f"Added route: {route_id} -> provider: {args.provider}, model: {args.model}")
+        prov_desc = f"providers: {args.providers}" if args.providers else f"provider: {args.provider}"
+        print(f"Added route: {route_id} -> {prov_desc}, model: {args.model}")
         return 0
     if args.command == "list-routes":
         config = load_config_file(args.config)
