@@ -1,5 +1,5 @@
 # Butter Proxy 🧈
-
+based off https://github.com/temikus/butter
 > A blazingly fast, multi-provider AI proxy gateway in Go with **explicit provider namespacing**, **automatic payload model rewriting**, and a **curated multi-client model catalog**.
 
 [![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://golang.org)
@@ -63,6 +63,48 @@ A single-file, dependency-free Python tool built to manage your gateway over SSH
 * Programmatically adds or removes model routes with validation.
 * Automatically discovers and syncs newly pulled Ollama or local worker models.
 * Detects display capabilities: launches a desktop GUI if available, or gracefully provides CLI subcommands and `--help` on headless Linux servers.
+
+### 5. Zero Data Retention (ZDR) & Upstream Payload Injection (`extra_body`)
+Enforce strict privacy constraints and upstream provider flags on a per-model basis without external dependencies.
+* **Native Deep Merging**: Implemented directly in the Butter proxy engine (`internal/proxy/engine.go:MergeExtraBodyInJSON` & `internal/config/config.go:ModelRoute.ExtraBody`) using Go's standard library `encoding/json`.
+* **Zero Data Retention Enforcement**: Seamlessly inject OpenRouter ZDR parameters (`zdr: true`, `data_collection: "deny"`, `require_parameters: false`) or custom provider payloads into outgoing requests while preserving authoritative model rewriting.
+
+```yaml
+routing:
+  models:
+    openrouter/nousresearch/hermes-3-llama-3.1-405b:
+      provider: openrouter
+      model: nousresearch/hermes-3-llama-3.1-405b
+      label: "Hermes 3 405B (ZDR Restricted)"
+      family: llama
+      strategy: priority
+      extra_body:
+        provider:
+          zdr: true
+          data_collection: "deny"
+          require_parameters: false
+```
+
+### 6. 1min.AI Multi-Model Provider Integration
+Butter natively bridges to **1min.AI's OpenAI-compatible gateway** (`https://api.1min.ai/openai/v1`), providing seamless access to over 60 upstream models (GPT-4o, Claude 3.5 Sonnet, Qwen 3.7, DeepSeek Flash, Moonshot Kimi, Mistral) with streaming SSE support:
+
+```yaml
+providers:
+  onemin:
+    base_url: https://api.1min.ai/openai/v1
+    keys:
+    - key: ${ONEMIN_AI_API_KEY}
+      weight: 1
+
+routing:
+  models:
+    onemin/gpt-4o-mini:
+      provider: onemin
+      model: gpt-4o-mini
+      label: "GPT-4o Mini (1min.AI)"
+      family: openai
+      strategy: priority
+```
 
 ---
 
