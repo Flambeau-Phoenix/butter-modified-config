@@ -10,7 +10,12 @@
 #        failover ('providers: [deepinfra, openrouter]').
 #   3. Curated metadata ('label', 'family') is broadcast via GET /v1/models and
 #      GET /api/models for clean client UI display.
-#   4. 'extra_body' allows injecting arbitrary upstream JSON parameters
+#   4. Dynamic Model Limits & Metadata:
+#      - Butter automatically resolves 'context_length' and 'max_output_tokens'
+#        directly from upstream providers and advertises them to client harnesses.
+#      - You do not need to specify limits: by default, no definition = automatic resolution (maximum available).
+#      - If you wish to enforce a lower/custom window, define 'context_length' and/or 'max_output_tokens'.
+#   5. 'extra_body' allows injecting arbitrary upstream JSON parameters
 #      (e.g., OpenRouter Zero Data Retention: {provider: {zdr: true}}).
 # ==============================================================================
 

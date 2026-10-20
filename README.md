@@ -51,8 +51,8 @@ Enforce strict privacy constraints or inject provider-specific routing flags on 
       require_parameters: false
   ```
 
-### 4. Curated Model Catalog (`/v1/models` & `/api/models`)
-Both `/v1/models` and `/api/models` return enriched metadata for every route:
+### 4. Curated Model Catalog & Dynamic Limits (`/v1/models` & `/api/models`)
+Both `/v1/models` and `/api/models` return enriched metadata and dynamic token limits for every route:
 ```json
 {
   "object": "list",
@@ -64,12 +64,16 @@ Both `/v1/models` and `/api/models` return enriched metadata for every route:
       "owned_by": "onemin",
       "owner": "onemin",
       "label": "GPT-4o Mini (1min.AI)",
-      "family": "openai"
+      "family": "openai",
+      "context_length": 128000,
+      "max_output_tokens": 16384
     }
   ]
 }
 ```
-Client applications can immediately render human-readable labels (`GPT-4o Mini (1min.AI)`) and provider badges (`onemin`) without hardcoded client-side lookup tables.
+* **Tells the Harness the Real Limits:** Automatically broadcasts `context_length` (total window) and `max_output_tokens` so client harnesses (Letta, WebUIs, etc.) can properly size prompts, manage history compaction, and avoid context overflow errors.
+* **Automatic Discovery:** By default, you do not need to specify limits in your configuration. Butter automatically resolves real context windows and completion limits directly from upstream providers.
+* **Optional Limit Overrides:** If you want to enforce a lower/custom window, you can define `context_length` and/or `max_output_tokens` directly under any route in `config.yaml` or via the config manager (`add-route` flags or the GUI **Model Limits** editor). By default, no definition = automatic resolution (maximum available).
 
 ---
 

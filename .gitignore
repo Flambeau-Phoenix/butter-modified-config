@@ -1,0 +1,18 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Config and credentials
+config.yaml
+!config.example.yaml
+!blank_config.yaml
+*.env
+*.key
+*.pem
+
+# Backups and logs
+*.bak*
+*.log
+model-metadata-cache.json
+temp*

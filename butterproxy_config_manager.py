@@ -47,9 +47,7 @@ except ImportError:  # pragma: no cover - remote support is optional
 APP_NAME = "Butterproxy Config Manager"
 VERSION = "1.1.0"
 DEFAULT_CONFIG_PATH = (
-    Path("/home/flambeau/butter/config.yaml")
-    if Path("/home/flambeau/butter/config.yaml").exists()
-    else (
+    (
         Path("/etc/butter/config.yaml")
         if Path("/etc/butter/config.yaml").exists()
         else Path("config.yaml")
@@ -465,6 +463,28 @@ def normalize_route_and_upstream(provider: str, model_id: str) -> tuple[str, str
     return (route_id, upstream)
 
 
+def validate_route_limits(route: dict[str, Any], route_id: str = "") -> None:
+    for field in ("context_length", "max_output_tokens"):
+        if field in route and (type(route[field]) is not int or route[field] <= 0):
+            raise ButterConfigError(f"Route {route_id!r} {field} must be a positive integer")
+    if "context_length" in route and "max_output_tokens" in route and route["max_output_tokens"] > route["context_length"]:
+        raise ButterConfigError(f"Route {route_id!r} max_output_tokens exceeds context_length")
+
+
+def set_route_limits(config: dict[str, Any], route_id: str, context: int | None, output: int | None) -> None:
+    routes = get_routes(config)
+    if route_id not in routes:
+        raise ButterConfigError(f"Route not found: {route_id}")
+    route = dict(routes[route_id])
+    for field, value in (("context_length", context), ("max_output_tokens", output)):
+        if value is None:
+            route.pop(field, None)
+        else:
+            route[field] = value
+    validate_route_limits(route, route_id)
+    routes[route_id] = route
+
+
 def validate_butter_config(config: dict[str, Any], strict: bool = True) -> None:
     providers = config.get("providers")
     if not isinstance(providers, dict):
@@ -479,6 +499,8 @@ def validate_butter_config(config: dict[str, Any], strict: bool = True) -> None:
         if not isinstance(provider, dict):
             raise ButterConfigError(f"Provider {name!r} must be a mapping")
         validate_base_url(str(provider.get("base_url") or ""))
+        if provider.get("metadata_adapter", "") not in {"", "openai-compatible", "ollama", "llama-cpp", "disabled"}:
+            raise ButterConfigError(f"Provider {name!r} has an invalid metadata_adapter")
 
     if strict:
         server = config.get("server")
@@ -496,6 +518,7 @@ def validate_butter_config(config: dict[str, Any], strict: bool = True) -> None:
             if isinstance(models, dict):
                 for model_id, route in models.items():
                     if isinstance(route, dict):
+                        validate_route_limits(route, str(model_id))
                         route_providers = normalize_route_providers(route)
                         if not route_providers:
                             raise ButterConfigError(
@@ -683,11 +706,17 @@ def apply_provider(
     providers[name] = provider
 
     routes = get_routes(config, create=True)
+    retained_models = set()
+    selected_upstreams = {normalize_route_and_upstream(name, item)[1] for item in selected}
     for model_id, route in list(routes.items()):
         if not isinstance(route, dict):
             continue
         route_providers = normalize_route_providers(route)
         if name not in route_providers:
+            continue
+        upstream = str(route.get("model") or normalize_route_and_upstream(name, str(model_id))[1])
+        if upstream in selected_upstreams:
+            retained_models.add(upstream)
             continue
         remaining = [item for item in route_providers if item != name]
         if remaining:
@@ -701,6 +730,8 @@ def apply_provider(
             routes.pop(model_id, None)
     for model_id in selected:
         route_id, upstream = normalize_route_and_upstream(name, model_id)
+        if upstream in retained_models:
+            continue
         existing_route = routes.get(route_id) or routes.get(model_id) or {}
         route = dict(existing_route) if isinstance(existing_route, dict) else {}
         route["provider"] = name
@@ -748,6 +779,10 @@ def apply_route(
     family: str | None = None,
     strategy: str = "priority",
     extra_body: dict[str, Any] | None = None,
+    context_length: int | None = None,
+    max_output_tokens: int | None = None,
+    clear_context_length: bool = False,
+    clear_max_output_tokens: bool = False,
 ) -> str:
     all_providers = config.get("providers")
     if not isinstance(all_providers, dict):
@@ -783,11 +818,20 @@ def apply_route(
         existing_route = {}
 
     route_entry: dict[str, Any] = {
+        **copy.deepcopy(existing_route),
         "model": upstream,
         "label": clean_label,
         "family": clean_family,
         "strategy": strategy,
     }
+    route_entry.pop("provider", None)
+    route_entry.pop("providers", None)
+    for field, value, clear in (("context_length", context_length, clear_context_length), ("max_output_tokens", max_output_tokens, clear_max_output_tokens)):
+        if clear:
+            route_entry.pop(field, None)
+        elif value is not None:
+            route_entry[field] = value
+    validate_route_limits(route_entry, clean_route)
     if len(target_providers) > 1:
         route_entry["providers"] = target_providers
     else:
@@ -833,6 +877,9 @@ def list_routes(config: dict[str, Any]) -> list[dict[str, Any]]:
         }
         if "extra_body" in route:
             entry["extra_body"] = route["extra_body"]
+        for field in ("context_length", "max_output_tokens"):
+            if field in route:
+                entry[field] = route[field]
         result.append(entry)
     return result
 
@@ -1327,6 +1374,7 @@ class ButterConfigGUI:
         ttk.Button(search_row, text="Select Visible", command=self.select_visible).pack(side=tk.LEFT)
         ttk.Button(search_row, text="Clear Visible", command=self.clear_visible).pack(side=tk.LEFT, padx=4)
         ttk.Button(search_row, text="Invert Visible", command=self.invert_visible).pack(side=tk.LEFT)
+        ttk.Button(search_row, text="Model Limits", command=self.edit_model_limits).pack(side=tk.LEFT, padx=4)
         self.model_tree = ttk.Treeview(models, columns=("use", "model"), show="headings", selectmode="extended")
         self.model_tree.heading("use", text="Use")
         self.model_tree.heading("model", text="Model ID")
@@ -1616,6 +1664,59 @@ class ButterConfigGUI:
             else:
                 self.chosen_models.add(model)
         self._refresh_model_tree()
+
+    def edit_model_limits(self) -> None:
+        """Edit explicit limits on an existing route; blank means automatic."""
+        try:
+            config = self._parse_preview(strict=False)
+            selected = self.model_tree.selection()
+            if not selected:
+                raise ButterConfigError("Select one model to edit its limits")
+            model = str(self.model_tree.item(selected[0])["values"][1])
+            provider = self.provider_var.get().strip()
+            matches = [
+                route_id for route_id, route in get_routes(config).items()
+                if isinstance(route, dict)
+                and provider in normalize_route_providers(route)
+                and str(route.get("model") or normalize_route_and_upstream(provider, route_id)[1]) == model
+            ]
+            if not matches:
+                raise ButterConfigError("Apply this model's provider and route before editing limits")
+            tk, ttk = self.tk, self.ttk
+            window = tk.Toplevel(self.root)
+            window.title("Model limits")
+            window.transient(self.root)
+            window.grab_set()
+            frame = ttk.Frame(window, padding=12)
+            frame.pack(fill=tk.BOTH, expand=True)
+            route_var = tk.StringVar(value=matches[0])
+            ttk.Label(frame, text="Route").grid(row=0, column=0, sticky=tk.W)
+            chooser = ttk.Combobox(frame, textvariable=route_var, values=matches, state="readonly", width=52)
+            chooser.grid(row=0, column=1, pady=5)
+            context_var, output_var = tk.StringVar(), tk.StringVar()
+            for row, label, var in [(1, "Total context tokens", context_var), (2, "Maximum output tokens", output_var)]:
+                ttk.Label(frame, text=label).grid(row=row, column=0, sticky=tk.W, padx=(0, 12))
+                ttk.Entry(frame, textvariable=var).grid(row=row, column=1, sticky=tk.EW, pady=5)
+            ttk.Label(frame, text="Leave blank to use automatically discovered metadata.").grid(row=3, column=0, columnspan=2, pady=8)
+            def load(_event: Any = None) -> None:
+                route = get_routes(config)[route_var.get()]
+                context_var.set(str(route.get("context_length", "")))
+                output_var.set(str(route.get("max_output_tokens", "")))
+            def save() -> None:
+                try:
+                    context = int(context_var.get()) if context_var.get().strip() else None
+                    output = int(output_var.get()) if output_var.get().strip() else None
+                    set_route_limits(config, route_var.get(), context, output)
+                    self._set_config(config)
+                    self._set_status("Updated model limits in preview")
+                    window.destroy()
+                except (ValueError, ButterConfigError) as exc:
+                    self.messagebox.showerror(APP_NAME, str(exc), parent=window)
+            chooser.bind("<<ComboboxSelected>>", load)
+            ttk.Button(frame, text="Apply to Preview", command=save).grid(row=4, column=1, sticky=tk.E)
+            load()
+        except Exception as exc:
+            self._show_error(exc)
 
     def _current_key(self, remote: bool = False) -> str:
         supplied = self.api_key_var.get().strip()
@@ -2121,6 +2222,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_route_cmd.add_argument("--route", help="Prefix route ID (defaults to <provider>/<model>)")
     add_route_cmd.add_argument("--label", help="Curated human label")
     add_route_cmd.add_argument("--family", help="Architecture family (e.g. qwen, llama, kimi)")
+    add_route_cmd.add_argument("--context-length", type=int, help="Total context limit in tokens")
+    add_route_cmd.add_argument("--max-output-tokens", type=int, help="Maximum completion tokens")
+    add_route_cmd.add_argument("--clear-context-length", action="store_true", help="Remove context override")
+    add_route_cmd.add_argument("--clear-max-output-tokens", action="store_true", help="Remove output override")
     add_route_cmd.add_argument("--strategy", default="priority", help="Strategy (default: priority)")
     add_route_cmd.add_argument("--extra-body", help="JSON string of arbitrary extra parameters to inject (e.g. ZDR)")
 
@@ -2201,6 +2306,10 @@ def run_cli(args: argparse.Namespace) -> int:
             family=args.family,
             strategy=args.strategy,
             extra_body=extra_body,
+            context_length=args.context_length,
+            max_output_tokens=args.max_output_tokens,
+            clear_context_length=args.clear_context_length,
+            clear_max_output_tokens=args.clear_max_output_tokens,
         )
         validate_butter_config(config, strict=True)
         atomic_write_text(args.config, dump_config(config), backup=True)
@@ -2213,10 +2322,10 @@ def run_cli(args: argparse.Namespace) -> int:
         if getattr(args, "json", False):
             print(json.dumps(routes, indent=2))
         else:
-            print(f"{'ROUTE ID':<35} {'PROVIDER':<15} {'UPSTREAM MODEL':<30} {'LABEL':<25} {'FAMILY':<10}")
+            print(f"{'ROUTE ID':<35} {'PROVIDER':<15} {'UPSTREAM MODEL':<30} {'LABEL':<25} {'FAMILY':<10} {'CONTEXT':>10} {'MAX OUTPUT':>10}")
             print("-" * 115)
             for r in routes:
-                print(f"{r['route_id']:<35} {r['provider']:<15} {r['model']:<30} {r['label']:<25} {r['family']:<10}")
+                print(f"{r['route_id']:<35} {r['provider']:<15} {r['model']:<30} {r['label']:<25} {r['family']:<10} {str(r.get('context_length', 'auto')):>10} {str(r.get('max_output_tokens', 'auto')):>10}")
         return 0
     if args.command == "remove-route":
         config = load_config_file(args.config)
