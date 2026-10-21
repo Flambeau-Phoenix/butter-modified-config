@@ -1,0 +1,9 @@
+# Runtime dependencies for butterproxy_config_manager.py
+PyYAML>=6.0
+requests>=2.31
+
+# Optional: edit configs on remote servers over SSH/SFTP
+# paramiko>=3.4
+
+# The desktop GUI (`gui` command) uses Tkinter, which ships with most Python
+# desktop installs; on Debian/Ubuntu: sudo apt install python3-tk
