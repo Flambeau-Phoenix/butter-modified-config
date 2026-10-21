@@ -1,6 +1,6 @@
 # Runtime dependencies for butterproxy_config_manager.py
 PyYAML>=6.0
-requests>=2.31
+requests>=2.34.2
 
 # Optional: edit configs on remote servers over SSH/SFTP
 # paramiko>=3.4
