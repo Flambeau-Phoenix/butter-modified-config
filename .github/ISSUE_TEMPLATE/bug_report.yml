@@ -1,0 +1,36 @@
+name: Bug report
+description: The config manager, templates or deploy script misbehave
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Remove API keys and private hostnames from anything you paste.
+        Problems with the Butter proxy itself belong in the upstream repository.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran, what you expected and what you got, including the error text.
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Smallest config that reproduces it
+      description: Redacted YAML if relevant.
+      render: yaml
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options: [CLI, Desktop GUI, Remote (SSH/SFTP), deploy.sh, Templates, Docs]
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: manager 1.1.0, Python 3.12, OS, Butter build (stock upstream or extended)
+    validations:
+      required: true
